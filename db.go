@@ -21,7 +21,8 @@ type DB interface {
 type database struct {
 	indexFile   *os.File // index file
 	dataFile    *os.File // data file
-	keySize     int
+	keyMinSize  int
+	keyMaxSize  int
 	keyIterator func(key []byte) iter.Seq2[int, byte]
 	newTrieNode func() trieNode
 	trieType    TrieType
@@ -82,21 +83,25 @@ func keyIter8Bit(key []byte) iter.Seq2[int, byte] {
 	}
 }
 
-func NewDatabase(name, dir string, keySize int, trieType TrieType) (DB, error) {
+func NewDatabase(name, dir string, keyMinSize, keyMaxSize int, trieType TrieType) (DB, error) {
+	if keyMinSize < 1 || keyMaxSize < 1 || keyMinSize > keyMaxSize {
+		return nil, errors.New("wrong key limits")
+	}
+
 	var keyIter func(key []byte) iter.Seq2[int, byte]
-	var trieNodeF func() trieNode
+	var newTrieNode func() trieNode
 	switch trieType {
 	case TrieType4Bit:
 		keyIter = keyIter4Bit
-		trieNodeF = func() trieNode { return &trieNode4{} }
+		newTrieNode = func() trieNode { return &trieNode4{} }
 	case TrieType8Bit:
 		keyIter = keyIter8Bit
-		trieNodeF = func() trieNode { return &trieNode8{} }
+		newTrieNode = func() trieNode { return &trieNode8{} }
 	default:
 		return nil, fmt.Errorf("illegal TrieType value %d", trieType)
 	}
 
-	trieSize := int64(reflect.TypeOf(trieNodeF()).Elem().Size())
+	trieSize := int64(reflect.TypeOf(newTrieNode()).Elem().Size())
 
 	idx, err := os.OpenFile(filepath.Join(dir, name+".idx"), os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -108,7 +113,7 @@ func NewDatabase(name, dir string, keySize int, trieType TrieType) (DB, error) {
 		return nil, err
 	}
 	if fi.Size() == 0 {
-		rootNode := trieNodeF()
+		rootNode := newTrieNode()
 		binary.Write(idx, binary.LittleEndian, rootNode)
 	} else if fi.Size()%trieSize != 0 {
 		return nil, ErrCorruptedIndex
@@ -121,9 +126,10 @@ func NewDatabase(name, dir string, keySize int, trieType TrieType) (DB, error) {
 	return &database{
 		indexFile:   idx,
 		dataFile:    data,
-		keySize:     keySize,
+		keyMinSize:  keyMinSize,
+		keyMaxSize:  keyMaxSize,
 		keyIterator: keyIter,
-		newTrieNode: trieNodeF,
+		newTrieNode: newTrieNode,
 		trieType:    trieType,
 		trieSize:    trieSize,
 	}, nil
@@ -132,7 +138,7 @@ func NewDatabase(name, dir string, keySize int, trieType TrieType) (DB, error) {
 // Get implements DB interface
 func (d *database) Get(key []byte) (io.Reader, error) {
 	// intentionally less strict key size validation
-	if len(key) > d.keySize {
+	if len(key) > d.keyMaxSize {
 		return nil, ErrInvalidKeySize
 	}
 
@@ -161,30 +167,25 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 			return nil, ErrKeyNotFound
 		}
 
-		dataOffset := -v
-		_, err = d.dataFile.Seek(dataOffset, io.SeekStart)
+		// decoded offset of data block
+		dataOffset := -v - 1
+
+		fullKey, err := d.readKeyInData(dataOffset)
 		if err != nil {
 			return nil, err
 		}
 
-		realKey := make([]byte, d.keySize)
-		var size int64
-
-		err = binary.Read(d.dataFile, binary.LittleEndian, realKey)
-		if err != nil {
-			return nil, err
-		}
-
-		if !slices.Equal(key, realKey[:len(key)]) {
+		if !slices.Equal(key, fullKey[:len(key)]) {
 			return nil, ErrKeyNotFound
 		}
 
+		var size int64
 		err = binary.Read(d.dataFile, binary.LittleEndian, &size)
 		if err != nil {
 			return nil, err
 		}
 
-		return io.NewSectionReader(d.dataFile, dataOffset+int64(len(key)+int64Size), size), nil
+		return io.NewSectionReader(d.dataFile, dataOffset+1+int64(len(fullKey))+int64Size, size), nil
 	}
 
 	return nil, ErrCorruptedIndex
@@ -193,7 +194,7 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 // Put implements DB interface
 func (d *database) Put(key []byte, data io.Reader) error {
 	// strict key size validation
-	if len(key) != d.keySize {
+	if len(key) < d.keyMinSize || len(key) > d.keyMaxSize {
 		return ErrInvalidKeySize
 	}
 
@@ -204,29 +205,38 @@ func (d *database) Put(key []byte, data io.Reader) error {
 	}
 
 	dataOffset := fi.Size()
-	if dataOffset == 0 {
-		dataOffset = 1 // the very first byte of the data file is reserved
-	}
 
-	// create a new key with the offset of data to be saved later in the data file
+	// store the key in the index file
 	err = d.putKey(key, dataOffset)
 	if err != nil {
 		return err
 	}
 
-	_, err = d.dataFile.Seek(dataOffset, io.SeekStart)
+	// append the data with header into the data file
+	return d.putData(key, data)
+}
+
+func (d *database) putData(key []byte, data io.Reader) error {
+	// header format
+	// 0: key size as 0 -> keyMinSize, 1 -> keyMinSize+1, 2 -> keyMinSize+2 ... 255 -> keyMinSize+255
+	// 1..len(key)+1: full key
+	// len(key)+2..len(key)+2+int64Size: data size
+	dataHeader := make([]byte, 1+len(key)+int64Size)
+
+	// Set key size encoding at position 0
+	dataHeader[0] = byte(len(key) - d.keyMinSize)
+
+	// Copy key bytes starting at position 1
+	copy(dataHeader[1:], key)
+
+	// prepare for writing the new data by seeking end of the data file
+	_, err := d.dataFile.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
 
-	// write the full key to data file first
-	_, err = d.dataFile.Write(key)
-	if err != nil {
-		return err
-	}
-
-	// reserve space for the data size
-	_, err = d.dataFile.Seek(int64Size, io.SeekCurrent)
+	// write data header to data file first
+	_, err = d.dataFile.Write(dataHeader)
 	if err != nil {
 		return err
 	}
@@ -238,7 +248,7 @@ func (d *database) Put(key []byte, data io.Reader) error {
 	}
 
 	// seek back to the reserved space for the data size
-	_, err = d.dataFile.Seek(dataOffset+int64(d.keySize), io.SeekStart)
+	_, err = d.dataFile.Seek(-(size + int64Size), io.SeekCurrent)
 	if err != nil {
 		return err
 	}
@@ -249,13 +259,7 @@ func (d *database) Put(key []byte, data io.Reader) error {
 		return err
 	}
 
-	// seek forward to the end of the data file
-	_, err = d.dataFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return d.dataFile.Sync()
 }
 
 // Put hash key into the index file and store the offset of the data in the data file
@@ -268,7 +272,9 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 		index       int64
 	)
 
-	dataOffset = -dataOffset // always encode offset in the index node as negative value
+	// we can't use possible zero and any positive value, so we encode this offset
+	// as negative an smaller by one
+	dataOffset = -dataOffset - 1
 
 	for i, k := range d.keyIterator(key) {
 		if key2 == nil {
@@ -282,7 +288,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				continue
 			} else if node.GetVariants()[k] < 0 {
 				dataOffset2 = node.GetVariants()[k]
-				key2, err = d.readKeyInData(-dataOffset2)
+				key2, err = d.readKeyInData(-dataOffset2 - 1)
 				if err != nil {
 					return err
 				}
@@ -330,7 +336,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 		break
 	}
 
-	return nil
+	return d.indexFile.Sync()
 }
 
 func (d *database) nibble(key []byte, idx int) byte {
@@ -372,12 +378,19 @@ func (d *database) appendIndex(node trieNode) error {
 }
 
 func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
-	var key = make([]byte, d.keySize)
-
 	_, err := d.dataFile.Seek(dataOffset, io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
+
+	var kSize byte
+	if err := binary.Read(d.dataFile, binary.LittleEndian, &kSize); err != nil {
+		return nil, err
+	}
+	// define as int because value could be bigger than max byte
+	keySize := int(kSize) + d.keyMinSize
+
+	var key = make([]byte, keySize)
 	if err := binary.Read(d.dataFile, binary.LittleEndian, key); err != nil {
 		return nil, err
 	}
