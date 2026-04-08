@@ -3,9 +3,7 @@ package db
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
-	"iter"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,89 +17,24 @@ type DB interface {
 }
 
 type database struct {
-	indexFile   *os.File // index file
-	dataFile    *os.File // data file
-	keyMinSize  int
-	keyMaxSize  int
-	keyIterator func(key []byte) iter.Seq2[int, byte]
-	newTrieNode func() trieNode
-	trieType    TrieType
-	trieSize    int64
-}
-
-type trieNode interface {
-	GetVariants() []int64
-}
-
-// 4-bit prefix tree node
-type trieNode4 struct {
-	Variants [16]int64
+	indexFile *os.File
+	dataFile  *os.File
+	trieType  TrieType
+	trieSize  int64
 }
 
 const int64Size = 8
 
-func (t *trieNode4) GetVariants() []int64 {
-	return t.Variants[:]
-}
-
-// 8-bit prefix tree node
-type trieNode8 struct {
-	Variants [256]int64
-}
-
-func (t *trieNode8) GetVariants() []int64 {
-	return t.Variants[:]
-}
-
 var (
 	ErrKeyNotFound      = errors.New("key not found")
+	ErrKeyEmpty         = errors.New("key is empty")
+	ErrKeyTooBig        = errors.New("key is too big")
 	ErrKeyAlreadyExists = errors.New("key already exists")
-	ErrInvalidKeySize   = errors.New("key size invalid")
 	ErrCorruptedIndex   = errors.New("corrupted index file")
 )
 
-func keyIter4Bit(key []byte) iter.Seq2[int, byte] {
-	return func(yield func(int, byte) bool) {
-		for i, b := range key {
-			if !yield(i*2, b>>4) {
-				break
-			}
-			if !yield(i*2+1, b&0xF) {
-				break
-			}
-		}
-	}
-}
-
-func keyIter8Bit(key []byte) iter.Seq2[int, byte] {
-	return func(yield func(int, byte) bool) {
-		for i, b := range key {
-			if !yield(i, b) {
-				break
-			}
-		}
-	}
-}
-
-func NewDatabase(name, dir string, keyMinSize, keyMaxSize int, trieType TrieType) (DB, error) {
-	if keyMinSize < 1 || keyMaxSize < 1 || keyMinSize > keyMaxSize {
-		return nil, errors.New("wrong key limits")
-	}
-
-	var keyIter func(key []byte) iter.Seq2[int, byte]
-	var newTrieNode func() trieNode
-	switch trieType {
-	case TrieType4Bit:
-		keyIter = keyIter4Bit
-		newTrieNode = func() trieNode { return &trieNode4{} }
-	case TrieType8Bit:
-		keyIter = keyIter8Bit
-		newTrieNode = func() trieNode { return &trieNode8{} }
-	default:
-		return nil, fmt.Errorf("illegal TrieType value %d", trieType)
-	}
-
-	trieSize := int64(reflect.TypeOf(newTrieNode()).Elem().Size())
+func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
+	trieSize := int64(reflect.TypeOf(trieType.NewTrieNode()).Elem().Size())
 
 	idx, err := os.OpenFile(filepath.Join(dir, name+".idx"), os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -113,7 +46,7 @@ func NewDatabase(name, dir string, keyMinSize, keyMaxSize int, trieType TrieType
 		return nil, err
 	}
 	if fi.Size() == 0 {
-		rootNode := newTrieNode()
+		rootNode := trieType.NewTrieNode()
 		binary.Write(idx, binary.LittleEndian, rootNode)
 	} else if fi.Size()%trieSize != 0 {
 		return nil, ErrCorruptedIndex
@@ -124,28 +57,26 @@ func NewDatabase(name, dir string, keyMinSize, keyMaxSize int, trieType TrieType
 		return nil, err
 	}
 	return &database{
-		indexFile:   idx,
-		dataFile:    data,
-		keyMinSize:  keyMinSize,
-		keyMaxSize:  keyMaxSize,
-		keyIterator: keyIter,
-		newTrieNode: newTrieNode,
-		trieType:    trieType,
-		trieSize:    trieSize,
+		indexFile: idx,
+		dataFile:  data,
+		trieType:  trieType,
+		trieSize:  trieSize,
 	}, nil
 }
 
 // Get implements DB interface
 func (d *database) Get(key []byte) (io.Reader, error) {
-	// intentionally less strict key size validation
-	if len(key) > d.keyMaxSize {
-		return nil, ErrInvalidKeySize
+	if len(key) == 0 {
+		return nil, ErrKeyEmpty
+	}
+	if len(key) > 256 {
+		return nil, ErrKeyTooBig
 	}
 
 	var index int64
-	var node trieNode = d.newTrieNode()
+	var node trieNode = d.trieType.NewTrieNode()
 
-	for _, b := range d.keyIterator(key) {
+	for _, b := range node.keyIter(key) {
 		_, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart)
 		if err != nil {
 			return nil, err
@@ -156,7 +87,7 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 			return nil, err
 		}
 
-		v := node.GetVariants()[b]
+		v := node.getVariants()[b]
 
 		if v > 0 {
 			index = v
@@ -175,7 +106,7 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 			return nil, err
 		}
 
-		if !slices.Equal(key, fullKey[:len(key)]) {
+		if len(fullKey) < len(key) || !slices.Equal(key, fullKey[:len(key)]) {
 			return nil, ErrKeyNotFound
 		}
 
@@ -193,9 +124,11 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 
 // Put implements DB interface
 func (d *database) Put(key []byte, data io.Reader) error {
-	// strict key size validation
-	if len(key) < d.keyMinSize || len(key) > d.keyMaxSize {
-		return ErrInvalidKeySize
+	if len(key) == 0 {
+		return ErrKeyEmpty
+	}
+	if len(key) > 256 {
+		return ErrKeyTooBig
 	}
 
 	// get file info of the data file
@@ -218,13 +151,13 @@ func (d *database) Put(key []byte, data io.Reader) error {
 
 func (d *database) putData(key []byte, data io.Reader) error {
 	// header format
-	// 0: key size as 0 -> keyMinSize, 1 -> keyMinSize+1, 2 -> keyMinSize+2 ... 255 -> keyMinSize+255
+	// 0: key size minus one, supports actual sizes from 1 up to 256, i.e. up to 2048 bit
 	// 1..len(key)+1: full key
 	// len(key)+2..len(key)+2+int64Size: data size
 	dataHeader := make([]byte, 1+len(key)+int64Size)
 
 	// Set key size encoding at position 0
-	dataHeader[0] = byte(len(key) - d.keyMinSize)
+	dataHeader[0] = byte(len(key) - 1)
 
 	// Copy key bytes starting at position 1
 	copy(dataHeader[1:], key)
@@ -268,7 +201,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 	var (
 		key2        []byte
 		dataOffset2 int64
-		node        trieNode = d.newTrieNode()
+		node        trieNode = d.trieType.NewTrieNode()
 		index       int64
 	)
 
@@ -276,18 +209,18 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 	// as negative an smaller by one
 	dataOffset = -dataOffset - 1
 
-	for i, k := range d.keyIterator(key) {
+	for i, k := range node.keyIter(key) {
 		if key2 == nil {
 			err := d.readIndex(node, index)
 			if err != nil {
 				return err
 			}
 
-			if node.GetVariants()[k] > 0 {
-				index = node.GetVariants()[k]
+			if node.getVariants()[k] > 0 {
+				index = node.getVariants()[k]
 				continue
-			} else if node.GetVariants()[k] < 0 {
-				dataOffset2 = node.GetVariants()[k]
+			} else if node.getVariants()[k] < 0 {
+				dataOffset2 = node.getVariants()[k]
 				key2, err = d.readKeyInData(-dataOffset2 - 1)
 				if err != nil {
 					return err
@@ -297,7 +230,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				}
 			}
 		} else {
-			node = d.newTrieNode()
+			node = d.trieType.NewTrieNode()
 			err := d.appendIndex(node)
 			if err != nil {
 				return err
@@ -315,7 +248,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				}
 				index = fi.Size() / d.trieSize
 
-				node.GetVariants()[k] = index
+				node.getVariants()[k] = index
 				err = d.rewritePreviousNode(node)
 				if err != nil {
 					return err
@@ -324,9 +257,9 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 			}
 		}
 
-		node.GetVariants()[k] = dataOffset
+		node.getVariants()[k] = dataOffset
 		if key2 != nil {
-			node.GetVariants()[k2] = dataOffset2
+			node.getVariants()[k2] = dataOffset2
 		}
 
 		err := d.rewritePreviousNode(node)
@@ -387,8 +320,7 @@ func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
 	if err := binary.Read(d.dataFile, binary.LittleEndian, &kSize); err != nil {
 		return nil, err
 	}
-	// define as int because value could be bigger than max byte
-	keySize := int(kSize) + d.keyMinSize
+	keySize := int(kSize) + 1
 
 	var key = make([]byte, keySize)
 	if err := binary.Read(d.dataFile, binary.LittleEndian, key); err != nil {
