@@ -11,7 +11,7 @@ func TestTrieTypeMarshalText(t *testing.T) {
 	}{
 		{"4bit", TrieType4Bit, "4bit", false},
 		{"8bit", TrieType8Bit, "8bit", false},
-		{"invalid", TrieType(999), "", true},
+		{"invalid", TrieType("999bit"), "", true},
 	}
 
 	for _, tt := range tests {
@@ -45,8 +45,8 @@ func TestTrieTypeUnmarshalText(t *testing.T) {
 	}{
 		{"4bit", "4bit", TrieType4Bit, false},
 		{"8bit", "8bit", TrieType8Bit, false},
-		{"invalid", "invalid", TrieType(0), true},
-		{"empty", "", TrieType(0), true},
+		{"invalid", "invalid", TrieType4Bit, true},
+		{"empty", "", TrieType4Bit, true},
 	}
 
 	for _, tt := range tests {

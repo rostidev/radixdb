@@ -1,3 +1,3 @@
-module github.com/rosti-il/radixdb
+module github.com/rostidev/radixdb
 
-go 1.24.9
+go 1.26.2
