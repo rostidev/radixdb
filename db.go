@@ -298,27 +298,17 @@ func (d *database) nibble(key []byte, idx int) byte {
 }
 
 func (d *database) readIndex(node trieNode, index int64) error {
-	_, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart)
-	if err != nil {
+	if _, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart); err != nil {
 		return err
 	}
-	err = binary.Read(d.indexFile, binary.LittleEndian, node)
-	if err != nil {
-		return err
-	}
-	return nil
+	return binary.Read(d.indexFile, binary.LittleEndian, node)
 }
 
 func (d *database) appendIndex(node trieNode) error {
-	_, err := d.indexFile.Seek(0, io.SeekEnd)
-	if err != nil {
+	if _, err := d.indexFile.Seek(0, io.SeekEnd); err != nil {
 		return err
 	}
-	err = binary.Write(d.indexFile, binary.LittleEndian, node)
-	if err != nil {
-		return err
-	}
-	return nil
+	return binary.Write(d.indexFile, binary.LittleEndian, node)
 }
 
 func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
