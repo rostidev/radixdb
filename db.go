@@ -150,14 +150,14 @@ func (d *database) Put(key []byte, data io.Reader) error {
 
 	dataOffset := fi.Size()
 
-	// store the key in the index file
-	err = d.putKey(key, dataOffset)
-	if err != nil {
+	// append the data with header into the data file first
+	// so the index never points to missing data after a crash
+	if err := d.putData(key, data); err != nil {
 		return err
 	}
 
-	// append the data with header into the data file
-	return d.putData(key, data)
+	// store the key in the index file
+	return d.putKey(key, dataOffset)
 }
 
 func (d *database) putData(key []byte, data io.Reader) error {
