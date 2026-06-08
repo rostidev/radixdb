@@ -15,6 +15,7 @@ func newTestDB(t *testing.T, trieType TrieType) DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { db.Close() })
 	return db
 }
 
@@ -166,10 +167,15 @@ func TestDatabase_ReopenExistingFiles(t *testing.T) {
 		t.Fatalf("Put failed: %v", err)
 	}
 
+	if err := db1.Close(); err != nil {
+		t.Fatalf("first Close failed: %v", err)
+	}
+
 	db2, err := NewDatabase("test", dir, TrieType8Bit)
 	if err != nil {
 		t.Fatalf("second NewDatabase failed: %v", err)
 	}
+	defer db2.Close()
 
 	r, err := db2.Get(key)
 	if err != nil {

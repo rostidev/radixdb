@@ -14,6 +14,7 @@ import (
 type DB interface {
 	Get(key []byte) (io.Reader, error)
 	Put(key []byte, data io.Reader) error
+	Close() error
 }
 
 type database struct {
@@ -43,17 +44,23 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 
 	fi, err := idx.Stat()
 	if err != nil {
+		idx.Close()
 		return nil, err
 	}
 	if fi.Size() == 0 {
 		rootNode := trieType.NewTrieNode()
-		binary.Write(idx, binary.LittleEndian, rootNode)
+		if err := binary.Write(idx, binary.LittleEndian, rootNode); err != nil {
+			idx.Close()
+			return nil, err
+		}
 	} else if fi.Size()%trieSize != 0 {
+		idx.Close()
 		return nil, ErrCorruptedIndex
 	}
 
 	data, err := os.OpenFile(filepath.Join(dir, name+".dat"), os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
+		idx.Close()
 		return nil, err
 	}
 	return &database{
@@ -328,6 +335,15 @@ func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
 	}
 
 	return key, nil
+}
+
+func (d *database) Close() error {
+	err1 := d.indexFile.Close()
+	err2 := d.dataFile.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 func (d *database) rewritePreviousNode(node trieNode) error {
