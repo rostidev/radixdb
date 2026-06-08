@@ -53,6 +53,10 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 			idx.Close()
 			return nil, err
 		}
+		if err := idx.Sync(); err != nil {
+			idx.Close()
+			return nil, err
+		}
 	} else if fi.Size()%trieSize != 0 {
 		idx.Close()
 		return nil, ErrCorruptedIndex
