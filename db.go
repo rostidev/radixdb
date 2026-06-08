@@ -342,12 +342,7 @@ func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
 }
 
 func (d *database) Close() error {
-	err1 := d.indexFile.Close()
-	err2 := d.dataFile.Close()
-	if err1 != nil {
-		return err1
-	}
-	return err2
+	return errors.Join(d.indexFile.Close(), d.dataFile.Close())
 }
 
 func (d *database) rewritePreviousNode(node trieNode) error {
