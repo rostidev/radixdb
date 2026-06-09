@@ -88,13 +88,7 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 	var node trieNode = d.trieType.NewTrieNode()
 
 	for _, b := range node.keyIter(key) {
-		_, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart)
-		if err != nil {
-			return nil, err
-		}
-
-		err = binary.Read(d.indexFile, binary.LittleEndian, node)
-		if err != nil {
+		if err := d.readIndex(node, index); err != nil {
 			return nil, err
 		}
 
@@ -122,8 +116,7 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 		}
 
 		var size int64
-		err = binary.Read(d.dataFile, binary.LittleEndian, &size)
-		if err != nil {
+		if err := binary.Read(d.dataFile, binary.LittleEndian, &size); err != nil {
 			return nil, err
 		}
 
