@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync"
 )
 
 // Main public interface of this key-value database.
@@ -22,6 +23,7 @@ type database struct {
 	dataFile  *os.File
 	trieType  TrieType
 	trieSize  int64
+	mu        sync.RWMutex
 }
 
 const int64Size = 8
@@ -75,8 +77,14 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 	}, nil
 }
 
-// Get implements DB interface
+// Get looks up a key and returns an io.SectionReader backed by the underlying data file.
+// The returned reader uses ReadAt (positional reads) and is safe to use concurrently
+// with Put calls. If a Delete function is added, this io.SectionReader could become
+// unsafe to use concurrently.
 func (d *database) Get(key []byte) (io.Reader, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
 	if len(key) == 0 {
 		return nil, ErrKeyEmpty
 	}
@@ -128,6 +136,9 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 
 // Put implements DB interface
 func (d *database) Put(key []byte, data io.Reader) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if len(key) == 0 {
 		return ErrKeyEmpty
 	}
@@ -325,6 +336,9 @@ func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
 }
 
 func (d *database) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	return errors.Join(d.indexFile.Close(), d.dataFile.Close())
 }
 
