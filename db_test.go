@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -258,11 +259,11 @@ func TestDatabase_ConcurrentReadsAndWrites(t *testing.T) {
 	const numWriters = 5
 	const iterations = 50
 
+	errc := make(chan error)
+
 	// Start concurrent readers
-	for r := 0; r < numReaders; r++ {
-		wg.Add(1)
-		go func(readerID int) {
-			defer wg.Done()
+	for readerID := range numReaders {
+		wg.Go(func() {
 			for iter := 0; iter < iterations; iter++ {
 				// Query static keys
 				for i := 0; i < numStaticKeys; i++ {
@@ -270,46 +271,61 @@ func TestDatabase_ConcurrentReadsAndWrites(t *testing.T) {
 					expectedVal := []byte{byte('A' + i)}
 					reader, err := db.Get(key)
 					if err != nil {
-						t.Errorf("[Reader %d] Get key %v failed: %v", readerID, key, err)
+						errc <- fmt.Errorf("[Reader %d] Get key %v failed: %w", readerID, key, err)
 						return
 					}
-					got := readAll(t, reader)
+					got, err := io.ReadAll(reader)
+					if err != nil {
+						errc <- fmt.Errorf("[Reader %d] ReadAll failed: %w", readerID, err)
+						return
+					}
 					if !bytes.Equal(got, expectedVal) {
-						t.Errorf("[Reader %d] key %v: expected %v, got %v", readerID, key, expectedVal, got)
+						errc <- fmt.Errorf("[Reader %d] key %v: expected %v, got %v", readerID, key, expectedVal, got)
 						return
 					}
 				}
 			}
-		}(r)
+		})
 	}
 
 	// Start concurrent writers (adding new/unique keys)
-	for w := 0; w < numWriters; w++ {
-		wg.Add(1)
-		go func(writerID int) {
-			defer wg.Done()
+	for writerID := range numWriters {
+		wg.Go(func() {
 			for iter := 0; iter < iterations; iter++ {
 				key := []byte{0xBB, byte(writerID), byte(iter)}
 				val := []byte{byte(writerID), byte(iter)}
 				if err := db.Put(key, bytes.NewReader(val)); err != nil {
-					t.Errorf("[Writer %d] Put failed: %v", writerID, err)
+					errc <- fmt.Errorf("[Writer %d] Put failed: %w", writerID, err)
 					return
 				}
 
 				// Verify we can read what we just wrote
 				reader, err := db.Get(key)
 				if err != nil {
-					t.Errorf("[Writer %d] Get failed for written key: %v", writerID, err)
+					errc <- fmt.Errorf("[Writer %d] Get failed for written key: %w", writerID, err)
 					return
 				}
-				got := readAll(t, reader)
+				got, err := io.ReadAll(reader)
+				if err != nil {
+					errc <- fmt.Errorf("[Writer %d] ReadAll failed: %w", writerID, err)
+					return
+				}
 				if !bytes.Equal(got, val) {
-					t.Errorf("[Writer %d] expected %v, got %v", writerID, val, got)
+					errc <- fmt.Errorf("[Writer %d] expected %v, got %v", writerID, val, got)
 					return
 				}
 			}
-		}(w)
+		})
 	}
 
-	wg.Wait()
+	// Close errc once all goroutines finish so the collector loop can exit.
+	go func() {
+		wg.Wait()
+		close(errc)
+	}()
+
+	// Collect and report all errors from the test goroutine.
+	for err := range errc {
+		t.Error(err)
+	}
 }
