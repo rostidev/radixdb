@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -237,4 +238,78 @@ func TestDatabase_NodeExpansionAndRetrieval(t *testing.T) {
 			t.Fatalf("for key %q expected %q, got %q", key, expected, got)
 		}
 	}
+}
+
+func TestDatabase_ConcurrentReadsAndWrites(t *testing.T) {
+	db := newTestDB(t, TrieType8Bit)
+
+	// Pre-populate some keys
+	const numStaticKeys = 10
+	for i := 0; i < numStaticKeys; i++ {
+		key := []byte{0xAA, byte(i)}
+		val := []byte{byte('A' + i)}
+		if err := db.Put(key, bytes.NewReader(val)); err != nil {
+			t.Fatalf("pre-population failed for index %d: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	const numReaders = 20
+	const numWriters = 5
+	const iterations = 50
+
+	// Start concurrent readers
+	for r := 0; r < numReaders; r++ {
+		wg.Add(1)
+		go func(readerID int) {
+			defer wg.Done()
+			for iter := 0; iter < iterations; iter++ {
+				// Query static keys
+				for i := 0; i < numStaticKeys; i++ {
+					key := []byte{0xAA, byte(i)}
+					expectedVal := []byte{byte('A' + i)}
+					reader, err := db.Get(key)
+					if err != nil {
+						t.Errorf("[Reader %d] Get key %v failed: %v", readerID, key, err)
+						return
+					}
+					got := readAll(t, reader)
+					if !bytes.Equal(got, expectedVal) {
+						t.Errorf("[Reader %d] key %v: expected %v, got %v", readerID, key, expectedVal, got)
+						return
+					}
+				}
+			}
+		}(r)
+	}
+
+	// Start concurrent writers (adding new/unique keys)
+	for w := 0; w < numWriters; w++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for iter := 0; iter < iterations; iter++ {
+				key := []byte{0xBB, byte(writerID), byte(iter)}
+				val := []byte{byte(writerID), byte(iter)}
+				if err := db.Put(key, bytes.NewReader(val)); err != nil {
+					t.Errorf("[Writer %d] Put failed: %v", writerID, err)
+					return
+				}
+
+				// Verify we can read what we just wrote
+				reader, err := db.Get(key)
+				if err != nil {
+					t.Errorf("[Writer %d] Get failed for written key: %v", writerID, err)
+					return
+				}
+				got := readAll(t, reader)
+				if !bytes.Equal(got, val) {
+					t.Errorf("[Writer %d] expected %v, got %v", writerID, val, got)
+					return
+				}
+			}
+		}(w)
+	}
+
+	wg.Wait()
 }

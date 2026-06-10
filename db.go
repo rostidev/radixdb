@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -92,18 +93,18 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 		return nil, ErrKeyTooBig
 	}
 
-	var index int64
+	var nextIndex int64
 	var node trieNode = d.trieType.NewTrieNode()
 
 	for _, b := range node.keyIter(key) {
-		if err := d.readIndex(node, index); err != nil {
+		if err := d.readIndex(node, nextIndex); err != nil {
 			return nil, err
 		}
 
 		v := node.getVariants()[b]
 
 		if v > 0 {
-			index = v
+			nextIndex = v
 			continue
 		}
 
@@ -123,12 +124,14 @@ func (d *database) Get(key []byte) (io.Reader, error) {
 			return nil, ErrKeyNotFound
 		}
 
-		var size int64
-		if err := binary.Read(d.dataFile, binary.LittleEndian, &size); err != nil {
+		var sizeBuf [8]byte
+		sizeOffset := dataOffset + 1 + int64(len(fullKey))
+		if _, err := d.dataFile.ReadAt(sizeBuf[:], sizeOffset); err != nil {
 			return nil, err
 		}
+		size := int64(binary.LittleEndian.Uint64(sizeBuf[:]))
 
-		return io.NewSectionReader(d.dataFile, dataOffset+1+int64(len(fullKey))+int64Size, size), nil
+		return io.NewSectionReader(d.dataFile, sizeOffset+int64Size, size), nil
 	}
 
 	return nil, ErrCorruptedIndex
@@ -214,10 +217,11 @@ func (d *database) putData(key []byte, data io.Reader) error {
 // in the last byte of the hash key.
 func (d *database) putKey(key []byte, dataOffset int64) error {
 	var (
-		key2        []byte
-		dataOffset2 int64
-		node        trieNode = d.trieType.NewTrieNode()
-		index       int64
+		key2         []byte
+		dataOffset2  int64
+		node         trieNode = d.trieType.NewTrieNode()
+		nextIndex    int64
+		currentIndex int64
 	)
 
 	// we can't use possible zero and any positive value, so we encode this offset
@@ -226,13 +230,14 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 
 	for i, k := range node.keyIter(key) {
 		if key2 == nil {
-			err := d.readIndex(node, index)
+			err := d.readIndex(node, nextIndex)
 			if err != nil {
 				return err
 			}
+			currentIndex = nextIndex
 
 			if node.getVariants()[k] > 0 {
-				index = node.getVariants()[k]
+				nextIndex = node.getVariants()[k]
 				continue
 			} else if node.getVariants()[k] < 0 {
 				dataOffset2 = node.getVariants()[k]
@@ -246,7 +251,8 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 			}
 		} else {
 			node = d.trieType.NewTrieNode()
-			err := d.appendIndex(node)
+			var err error
+			currentIndex, err = d.appendIndex(node)
 			if err != nil {
 				return err
 			}
@@ -261,10 +267,10 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				if err != nil {
 					return err
 				}
-				index = fi.Size() / d.trieSize
+				nextIndex = fi.Size() / d.trieSize
 
-				node.getVariants()[k] = index
-				err = d.rewritePreviousNode(node)
+				node.getVariants()[k] = nextIndex
+				err = d.rewriteNode(node, currentIndex)
 				if err != nil {
 					return err
 				}
@@ -277,7 +283,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 			node.getVariants()[k2] = dataOffset2
 		}
 
-		err := d.rewritePreviousNode(node)
+		err := d.rewriteNode(node, currentIndex)
 		if err != nil {
 			return err
 		}
@@ -302,33 +308,38 @@ func (d *database) nibble(key []byte, idx int) byte {
 }
 
 func (d *database) readIndex(node trieNode, index int64) error {
-	if _, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart); err != nil {
+	buf := make([]byte, d.trieSize)
+	if _, err := d.indexFile.ReadAt(buf, index*d.trieSize); err != nil {
 		return err
 	}
-	return binary.Read(d.indexFile, binary.LittleEndian, node)
+	return binary.Read(bytes.NewReader(buf), binary.LittleEndian, node)
 }
 
-func (d *database) appendIndex(node trieNode) error {
-	if _, err := d.indexFile.Seek(0, io.SeekEnd); err != nil {
-		return err
+func (d *database) appendIndex(node trieNode) (int64, error) {
+	fi, err := d.indexFile.Stat()
+	if err != nil {
+		return 0, err
 	}
-	return binary.Write(d.indexFile, binary.LittleEndian, node)
+	index := fi.Size() / d.trieSize
+
+	if _, err := d.indexFile.Seek(0, io.SeekEnd); err != nil {
+		return 0, err
+	}
+	if err := binary.Write(d.indexFile, binary.LittleEndian, node); err != nil {
+		return 0, err
+	}
+	return index, nil
 }
 
 func (d *database) readKeyInData(dataOffset int64) ([]byte, error) {
-	_, err := d.dataFile.Seek(dataOffset, io.SeekStart)
-	if err != nil {
+	var kSize [1]byte
+	if _, err := d.dataFile.ReadAt(kSize[:], dataOffset); err != nil {
 		return nil, err
 	}
-
-	var kSize byte
-	if err := binary.Read(d.dataFile, binary.LittleEndian, &kSize); err != nil {
-		return nil, err
-	}
-	keySize := int(kSize) + 1
+	keySize := int(kSize[0]) + 1
 
 	var key = make([]byte, keySize)
-	if err := binary.Read(d.dataFile, binary.LittleEndian, key); err != nil {
+	if _, err := d.dataFile.ReadAt(key, dataOffset+1); err != nil {
 		return nil, err
 	}
 
@@ -342,14 +353,10 @@ func (d *database) Close() error {
 	return errors.Join(d.indexFile.Close(), d.dataFile.Close())
 }
 
-func (d *database) rewritePreviousNode(node trieNode) error {
-	_, err := d.indexFile.Seek(-d.trieSize, io.SeekCurrent)
+func (d *database) rewriteNode(node trieNode, index int64) error {
+	_, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart)
 	if err != nil {
 		return err
 	}
-	err = binary.Write(d.indexFile, binary.LittleEndian, node)
-	if err != nil {
-		return err
-	}
-	return nil
+	return binary.Write(d.indexFile, binary.LittleEndian, node)
 }
