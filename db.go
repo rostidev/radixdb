@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sync"
 )
@@ -23,7 +22,6 @@ type database struct {
 	indexFile *os.File
 	dataFile  *os.File
 	trieType  TrieType
-	trieSize  int64
 	mu        sync.RWMutex
 }
 
@@ -39,8 +37,6 @@ var (
 )
 
 func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
-	trieSize := int64(reflect.TypeOf(trieType.NewTrieNode()).Elem().Size())
-
 	idx, err := os.OpenFile(filepath.Join(dir, name+".idx"), os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, err
@@ -61,7 +57,7 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 			idx.Close()
 			return nil, err
 		}
-	} else if fi.Size()%trieSize != 0 {
+	} else if fi.Size()%trieType.NodeSize() != 0 {
 		idx.Close()
 		return nil, ErrCorruptedIndex
 	}
@@ -75,7 +71,6 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 		indexFile: idx,
 		dataFile:  data,
 		trieType:  trieType,
-		trieSize:  trieSize,
 	}, nil
 }
 
@@ -274,7 +269,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				if err != nil {
 					return err
 				}
-				nextIndex = fi.Size() / d.trieSize
+				nextIndex = fi.Size() / d.trieType.NodeSize()
 
 				node.getVariants()[k] = nextIndex
 				err = d.rewriteNode(node, currentIndex)
@@ -315,8 +310,8 @@ func (d *database) keySymbolAt(key []byte, idx int) byte {
 }
 
 func (d *database) readIndex(node trieNode, index int64) error {
-	buf := make([]byte, d.trieSize)
-	if _, err := d.indexFile.ReadAt(buf, index*d.trieSize); err != nil {
+	buf := make([]byte, d.trieType.NodeSize())
+	if _, err := d.indexFile.ReadAt(buf, index*d.trieType.NodeSize()); err != nil {
 		return err
 	}
 	return binary.Read(bytes.NewReader(buf), binary.LittleEndian, node)
@@ -327,7 +322,7 @@ func (d *database) appendIndex(node trieNode) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	index := fi.Size() / d.trieSize
+	index := fi.Size() / d.trieType.NodeSize()
 
 	if _, err := d.indexFile.Seek(0, io.SeekEnd); err != nil {
 		return 0, err
@@ -361,7 +356,7 @@ func (d *database) Close() error {
 }
 
 func (d *database) rewriteNode(node trieNode, index int64) error {
-	_, err := d.indexFile.Seek(index*d.trieSize, io.SeekStart)
+	_, err := d.indexFile.Seek(index*d.trieType.NodeSize(), io.SeekStart)
 	if err != nil {
 		return err
 	}

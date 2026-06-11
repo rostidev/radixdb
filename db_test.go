@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -41,7 +42,7 @@ func TestDatabase_GetKeyNotFound(t *testing.T) {
 
 func TestDatabase_PutAndGetExactKey(t *testing.T) {
 	for _, trieType := range []TrieType{TrieType4Bit, TrieType8Bit} {
-		t.Run(string(trieType), func(t *testing.T) {
+		t.Run(reflect.TypeOf(trieType.NewTrieNode()).Elem().Name(), func(t *testing.T) {
 			db := newTestDB(t, trieType)
 
 			key := []byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
