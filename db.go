@@ -34,6 +34,7 @@ var (
 	ErrKeyEmpty         = errors.New("key is empty")
 	ErrKeyTooBig        = errors.New("key is too big")
 	ErrKeyAlreadyExists = errors.New("key already exists")
+	ErrKeyConflict      = errors.New("existing key is a prefix of the new longer key")
 	ErrCorruptedIndex   = errors.New("corrupted index file")
 )
 
@@ -248,6 +249,12 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 				if slices.Equal(key, key2) {
 					return ErrKeyAlreadyExists
 				}
+				// The existing key is an exact prefix of the new longer key.
+				// The trie does not support inserting a longer key when its
+				// prefix already exists as a separate key.
+				if len(key) > len(key2) {
+					return ErrKeyConflict
+				}
 			}
 		} else {
 			node = d.trieType.NewTrieNode()
@@ -261,7 +268,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 		var k2 byte
 
 		if key2 != nil {
-			k2 = d.nibble(key2, i)
+			k2 = d.keySymbolAt(key2, i)
 			if k == k2 {
 				fi, err := d.indexFile.Stat()
 				if err != nil {
@@ -293,7 +300,7 @@ func (d *database) putKey(key []byte, dataOffset int64) error {
 	return d.indexFile.Sync()
 }
 
-func (d *database) nibble(key []byte, idx int) byte {
+func (d *database) keySymbolAt(key []byte, idx int) byte {
 	if d.trieType == TrieType8Bit {
 		return key[idx]
 	}

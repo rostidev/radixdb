@@ -241,6 +241,34 @@ func TestDatabase_NodeExpansionAndRetrieval(t *testing.T) {
 	}
 }
 
+func TestDatabase_PutLongerKeyAfterShorterKey(t *testing.T) {
+	db := newTestDB(t, TrieType8Bit)
+
+	// Insert a shorter key first
+	shortKey := []byte{0xAA, 0xBB}
+	if err := db.Put(shortKey, bytes.NewReader([]byte("short"))); err != nil {
+		t.Fatalf("Put short key failed: %v", err)
+	}
+
+	// Inserting a longer key with the same prefix as an existing shorter key
+	// is not supported — the trie cannot split a data pointer into a child
+	// node when the existing key is shorter than the new key.
+	longKey := []byte{0xAA, 0xBB, 0xCC}
+	err := db.Put(longKey, bytes.NewReader([]byte("long")))
+	if err != ErrKeyConflict {
+		t.Fatalf("expected %v, got %v", ErrKeyConflict, err)
+	}
+
+	// Verify the original short key is still retrievable
+	r, err := db.Get(shortKey)
+	if err != nil {
+		t.Fatalf("Get short key failed: %v", err)
+	}
+	if got := readAll(t, r); !bytes.Equal(got, []byte("short")) {
+		t.Fatalf("short key: expected %q, got %q", "short", got)
+	}
+}
+
 func TestDatabase_ConcurrentReadsAndWrites(t *testing.T) {
 	db := newTestDB(t, TrieType8Bit)
 
