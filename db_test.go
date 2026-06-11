@@ -358,3 +358,28 @@ func TestDatabase_ConcurrentReadsAndWrites(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestDatabase_GetLongerKeyAfterShorterKey(t *testing.T) {
+	db := newTestDB(t, TrieType8Bit)
+
+	shortKey := []byte{0xAA, 0xBB}
+	if err := db.Put(shortKey, bytes.NewReader([]byte("short"))); err != nil {
+		t.Fatalf("Put short key failed: %v", err)
+	}
+
+	// Query with a longer key that has the short key as a prefix
+	longKey := []byte{0xAA, 0xBB, 0xCC}
+	_, err := db.Get(longKey)
+	if err != ErrKeyNotFound {
+		t.Fatalf("expected %v, got %v", ErrKeyNotFound, err)
+	}
+
+	// Verify short key is still retrievable
+	r, err := db.Get(shortKey)
+	if err != nil {
+		t.Fatalf("Get short key failed: %v", err)
+	}
+	if got := readAll(t, r); !bytes.Equal(got, []byte("short")) {
+		t.Fatalf("short key: expected %q, got %q", "short", got)
+	}
+}
