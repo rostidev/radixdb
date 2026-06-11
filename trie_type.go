@@ -1,4 +1,4 @@
-package db
+package radixdb
 
 type TrieType interface {
 	NewTrieNode() trieNode
