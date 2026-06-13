@@ -74,10 +74,12 @@ func NewDatabase(name, dir string, trieType TrieType) (DB, error) {
 	}, nil
 }
 
-// Get looks up a key and returns an io.SectionReader backed by the underlying data file.
-// The returned reader uses ReadAt (positional reads) and is safe to use concurrently
-// with Put calls. If a Delete function is added, this io.SectionReader could become
-// unsafe to use concurrently.
+// Get returns the value for key. The lookup is prefix-based: key may be an
+// exact stored key or a unique prefix of one.
+//
+// It returns an io.SectionReader backed by the underlying data file. This reader
+// uses ReadAt and is safe to use concurrently with Put calls. If a Delete
+// function is added, it could become unsafe to use concurrently.
 func (d *database) Get(key []byte) (io.Reader, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
